@@ -1,81 +1,101 @@
-/***********************************************************************************************
- *  Copyright 2016 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- *  Licensed under the Amazon Software License (the "License"). You may not use
- *  this file except in compliance with the License. A copy of the License is located at
- *
- *      http://aws.amazon.com/asl/
- *
- *  or in the "license" file accompanying this file. This file is distributed on an "AS IS"
- *  BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, express or implied. See the License
- *  for the specific language governing permissions and limitations under the License.
- *                                                                                 *
- * @author Solution Builders
- * @function errorHandler
- * @description triggered by a failed encoding job or workflow lambda function, send a
- * SNS notification and update the DynamoDB table.
- *
- *********************************************************************************************/
+/*********************************************************************************************************************
+ *  Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.                                           *
+ *                                                                                                                    *
+ *  Licensed under the Apache License, Version 2.0 (the "License"). You may not use this file except in compliance    *
+ *  with the License. A copy of the License is located at                                                             *
+ *                                                                                                                    *
+ *      http://www.apache.org/licenses/LICENSE-2.0                                                                    *
+ *                                                                                                                    *
+ *  or in the 'license' file accompanying this file. This file is distributed on an 'AS IS' BASIS, WITHOUT WARRANTIES *
+ *  OR CONDITIONS OF ANY KIND, express or implied. See the License for the specific language governing permissions    *
+ *  and limitations under the License.                                                                                *
+ *********************************************************************************************************************/
 
-const os = require('os');
 const AWS = require('aws-sdk');
 
 exports.handler = async (event) => {
-	console.log('REQUEST:: ', JSON.stringify(event, null, 2));
+    console.log(`REQUEST:: ${JSON.stringify(event, null, 2)}`);
 
-	const dynamo = new AWS.DynamoDB.DocumentClient({
-		region: process.env.AWS_REGION
-	});
-	const sns = new AWS.SNS({
-		region: process.env.AWS_REGION
-	});
+    const dynamo = new AWS.DynamoDB.DocumentClient({
+        region: process.env.AWS_REGION
+    });
 
-	try {
+    const sns = new AWS.SNS({
+        region: process.env.AWS_REGION
+    });
 
-		let guid;
-		let values;
-		let url;
+    let guid,
+        values,
+        url,
+        msg;
 
-		if (event.function) {
-			url = 'https://console.aws.amazon.com/cloudwatch/home?region=' + process.env.AWS_REGION + '#logStream:group=/aws/lambda/' + event.function;
-			guid = event.guid;
-			values = {
-				":st": "error",
-				":ea": event.function,
-				":em": event.error
-			};
-		}
+    try {
+        if (event.function) {
+            url = 'https://console.aws.amazon.com/cloudwatch/home?region=' + process.env.AWS_REGION + '#logStream:group=/aws/lambda/' + event.function;
+            guid = event.guid;
+            values = {
+                ':st': 'Error',
+                ':ea': event.function,
+                ':em': event.error,
+                ':ed': url
+            };
 
-		if (event.detail) {
-			url = 'https://console.aws.amazon.com/mediaconvert/home?region=' + process.env.AWS_REGION + '#/jobs/summary/' + event.detail.jobId;
-			guid = event.detail.userMetadata.guid;
-			values = {
-				":st": "error",
-				":ea": "encoding",
-				":em": JSON.stringify(event, null, 2)
-			};
-		}
-		//Update DynamoDB
-		let params = {
-			TableName: process.env.DynamoDBTable,
-			Key: {
-				guid: guid
-			},
-			UpdateExpression: 'SET workflowStatus = :st,' + 'workflowErrorAt = :ea,' + 'errorMessage = :em',
-			ExpressionAttributeValues: values
-		};
-		await dynamo.update(params).promise();
+            // Msg update to match DynamoDB entry
+            msg = {
+                guid: guid,
+                workflowStatus: 'Error',
+                workflowErrorAt: event.function,
+                errorMessage: event.error,
+                errorDetails: url
+            };
+        }
 
-		//Send SNS notification
-		let msg = {
-			Message: 'Please see the AWS console for detail :' + url + os.EOL + JSON.stringify(event, null, 2),
-			Subject: ' workflow error: ' + guid,
-			TargetArn: process.env.SnsTopic
-		};
-		await sns.publish(msg).promise();
-	} catch (err) {
-		console.log(err);
-		throw err;
-	}
-	return event;
+        if (event.detail) {
+            url = 'https://console.aws.amazon.com/mediaconvert/home?region=' + process.env.AWS_REGION + '#/jobs/summary/' + event.detail.jobId;
+            guid = event.detail.userMetadata.guid;
+            values = {
+                ':st': 'Error',
+                ':ea': 'Encoding',
+                ':em': JSON.stringify(event, null, 2),
+                ':ed': url
+            };
+
+            // Msg update to match DynamoDB entry
+            msg = {
+                guid: guid,
+                workflowStatus: 'Error',
+                workflowErrorAt: 'Encoding',
+                errorMessage: event.detail.errorMessage,
+                errorDetails: url,
+            };
+        }
+
+        console.log(JSON.stringify(msg, null, 2));
+
+        // Update DynamoDB
+        let params = {
+            TableName: process.env.DynamoDBTable,
+            Key: {
+                guid: guid
+            },
+            UpdateExpression: 'SET workflowStatus = :st,' + 'workflowErrorAt = :ea,' + 'errorMessage = :em,' + 'errorDetails = :ed',
+            ExpressionAttributeValues: values
+        };
+
+        await dynamo.update(params).promise();
+
+        // Feature/so-vod-173 match SNS data structure with the SNS Notification
+        // Function for consistency.
+        params = {
+            Message: JSON.stringify(msg, null, 2),
+            Subject: ' workflow Status:: Error: ' + guid,
+            TargetArn: process.env.SnsTopic
+        };
+
+        await sns.publish(params).promise();
+    } catch (err) {
+        throw err;
+    }
+
+    return event;
 };
